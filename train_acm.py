@@ -6,7 +6,7 @@ from utils import remove_empty_slots
 from user import User
 from utils import Sent_Score
 from dialogue_config import agent_actions
-from actrain import Actor_Critic
+from advantage_acm import AdvantageACM
 import os
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"]="1"
@@ -65,7 +65,7 @@ if __name__ == "__main__":
         user = User(constants)
     emc = ErrorModelController(db_dict, constants)
     state_tracker = StateTracker(database, constants)
-    acm = Actor_Critic(state_tracker.get_state_size(), constants)
+    acm = AdvantageACM(state_tracker.get_state_size(), constants)
     
     
     
@@ -78,10 +78,9 @@ def run_round(state,Agent_Actions,User_Actions,tot_slt_len,stp,q, warmup):
     u_q = q                ##User Question
     pen = 0         ##User asked Question Agent replied Question
     # 1) Agent takes action given state tracker's representation of dialogue (state)
-    agent_action_index,agent_action,AF = acm.act(state)
-    #agent_action_index,agent_action,AC = acm.act(state)
+    agent_action_index,agent_action = acm.act(state,warmup)
     print('Agent Action_Index:',agent_action_index)
-    print('Agent_Action:',agent_action)   
+    #print('Agent_Action:',agent_action)   
     if(agent_action['intent']=='request'):
         a_q = 1
     if(agent_action_index in Agent_Actions):
@@ -94,7 +93,7 @@ def run_round(state,Agent_Actions,User_Actions,tot_slt_len,stp,q, warmup):
     state_tracker.update_state_agent(agent_action)
     # 3) User takes action given agent action
     user_action, reward, done, success = user.step(agent_action,tot_slt_len,stp)
-    print('User_Action:',user_action)
+    #print('User_Action:',user_action)
     #print('Task Oriented Reward: ',reward)
     p = user_action
     res = {key: p[key] for key in p.keys() 
@@ -105,13 +104,15 @@ def run_round(state,Agent_Actions,User_Actions,tot_slt_len,stp,q, warmup):
     if not done:
         # 4) Infuse error into semantic frame level of user action
         emc.infuse_error(user_action)
-    # 5) Update state tracker with user action
-    state_tracker.update_state_user(user_action)
-    # 6) Get next state and add experience
-    next_state = state_tracker.get_state(done)
+
     ss = Sent_Score(a_r,u_r,pen)
     reward = reward + ss
-    acm.remember(state, AF, reward, next_state, done)
+    # 5) Update state tracker with user action and reward
+    state_tracker.update_state_user(user_action,reward)
+    # 6) Get next state and add experience
+    next_state = state_tracker.get_state(done)
+
+    acm.remember(state,agent_action_index, reward, next_state, done)
     print('Total Reward:',reward)
     return next_state, reward, done, success,Agent_Actions,q
 
@@ -129,7 +130,7 @@ def warmup_run():
     total_step = 0
     s = 0
     while total_step != WARMUP_MEM and not acm.is_memory_full():
-        #print('WarmupPhase:',total_step)
+        print('WarmupPhase:',total_step)
         # Reset episode
         tot_slot_len = episode_reset()
         Agent_Actions = []
@@ -217,18 +218,19 @@ def train_run():
             print('Episode:',episode)
             print('Avg Reward:',avg_reward)
             print('Avg length:',avg_len)
-            #if success_rate >= success_rate_best and success_rate >= SUCCESS_RATE_THRESHOLD:
-                #acm.empty_memory()
+            if success_rate >= success_rate_best and success_rate >= SUCCESS_RATE_THRESHOLD:
+                acm.empty_memory()
             # Update current best success rate
             if success_rate > success_rate_best:
                 print('Episode: {} NEW BEST SUCCESS RATE: {} Avg Reward: {}' .format(episode, success_rate, avg_reward))
+                acm.save()
                 success_rate_best = success_rate
             period_success_total = 0
             period_reward_total = 0
             l = 0
             # Copy
             # Train
-            acm.train_actor_critic()
+            acm.train_advantage_actor_critic()
     print('!!Training Result  ')
     print('Success Rate:',succ_rate)
     print('No of Success:',N)
@@ -254,11 +256,12 @@ def episode_reset():
     # Infuse with error
     emc.infuse_error(user_action)
     # And update state tracker
-    state_tracker.update_state_user(user_action)
+    intial_reward = 0
+    state_tracker.update_state_user(user_action,intial_reward)
     # Finally, reset agent
     acm.reset()
     return tot_slt
 
 
-#warmup_run()
+warmup_run()
 train_run()
